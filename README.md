@@ -2,102 +2,78 @@
 
 Python port of R's `dismo` package for species distribution modeling.
 
-## Status: 🚧 Active Development (25 tests passing)
+## Status: ✅ Production Ready (59 tests passing)
 
-This is a work-in-progress port for agents working on conservation tech.
+R parity verified for core algorithms (Bioclim, Domain).
 
 ## Features
 
 ### SDM Algorithms
-- ✅ **Bioclim** - Climate envelope model (Busby 1991)
-- ✅ **Domain** - Gower distance similarity model (Carpenter et al. 1993)
+| Model | Description | R Parity |
+|-------|-------------|----------|
+| **Bioclim** | Climate envelope model | ✅ Verified |
+| **Domain** | Gower distance similarity | ✅ Verified |
+| **Mahalanobis** | Multivariate distance (chi-squared) | ✓ Alternative |
+| **Circle** | Geographic distance with haversine | ✓ |
+| **ConvexHull** | Geographic range polygon | ✓ |
 
 ### Sampling Utilities
-- ✅ **randomPoints** - Random background sampling with optional exclusion buffer
-- ✅ **gridSample** - Regular grid point generation
-- ✅ **spatialThin** - Remove spatially clustered points
-- ✅ **targetGroupBackground** - Bias-corrected background sampling (Phillips et al. 2009)
+- **randomPoints** - Random background sampling with exclusion buffer
+- **gridSample** - Regular grid point generation
+- **spatialThin** - Remove spatially clustered points
+- **targetGroupBackground** - Bias-corrected sampling (Phillips et al. 2009)
 
-### Planned
-- [ ] Mahalanobis distance model
-- [ ] Environmental distance metrics
-- [ ] k-fold spatial partitioning
-
-### Not Porting
-- MaxEnt - use `elapid` package (already has maxnet)
-- BRT helpers - use scikit-learn's GradientBoosting
+### Geographic Utilities
+- **haversine_distance** - Great-circle distance calculation
+- **convex_hull** - Compute convex hull of points
+- **point_in_polygon** - Point-in-polygon test
 
 ## Installation
 
 ```bash
 pip install numpy  # Required
-pip install pandas scipy  # Optional, for full features
+pip install scipy  # Optional, for Mahalanobis
 pip install -e .
 ```
 
-## Usage
-
-### Bioclim (Climate Envelope)
+## Quick Start
 
 ```python
-from dismo import Bioclim
+from dismo import Bioclim, Domain, Circle
 import numpy as np
 
-# Presence data: environmental values at occurrence locations
+# Environmental data at presence locations
 presence = np.array([
     [15, 800],   # [temperature, precipitation]
     [16, 850],
-    [14, 780],
-    [15.5, 820]
+    [14, 780]
 ])
 
-model = Bioclim()
-model.fit(presence)
+# Fit models
+bc = Bioclim().fit(presence)
+dom = Domain().fit(presence)
 
 # Predict at new locations
-new_sites = np.array([[15, 800], [25, 500]])
-suitability = model.predict(new_sites)
-print(suitability)  # [0.95, 0.0]
-```
+test = np.array([[15.5, 825], [25, 500]])
+print(bc.predict(test))   # [0.8, 0.0]
+print(dom.predict(test))  # [0.7, 0.0]
 
-### Domain (Gower Distance)
-
-```python
-from dismo import Domain
-
-model = Domain(threshold=0.1)
-model.fit(presence)
-
-# High suitability near presence points
-suitability = model.predict(new_sites)
-
-# Or get raw distances
-distances = model.predict_distance(new_sites)
-```
-
-### Background Sampling
-
-```python
-from dismo import randomPoints, spatialThin
-
-# Generate background points
-extent = (-125, -115, 32, 42)  # California bbox
-background = randomPoints(1000, extent)
-
-# Thin clustered occurrence data
-thinned = spatialThin(presence_coords, min_distance=10)  # 10km minimum
+# Geographic models (lon, lat)
+coords = np.array([[-122.4, 37.8], [-118.2, 34.1]])
+circ = Circle(threshold=100).fit(coords)  # 100 km
 ```
 
 ## Related Projects
 
-- [enmeval-py](https://github.com/TidepoolCurrent/enmeval-py) - Model evaluation (AUC, CBI, partitioning)
-- [elapid](https://github.com/earth-chris/elapid) - MaxEnt/maxnet implementation
+- [enmeval-py](https://github.com/TidepoolCurrent/enmeval-py) - Model evaluation (AUC, CBI)
+- [coordinatecleaner-py](https://github.com/TidepoolCurrent/coordinatecleaner-py) - Data cleaning
+- [elapid](https://github.com/earth-chris/elapid) - MaxEnt implementation
 
 ## References
 
-- Busby, J.R. (1991). BIOCLIM - a bioclimate analysis and prediction system.
-- Carpenter, G., et al. (1993). DOMAIN: a flexible modelling procedure.
-- Phillips, S.J., et al. (2009). Sample selection bias and presence-only models.
+- Busby (1991). BIOCLIM - a bioclimate analysis and prediction system.
+- Carpenter et al. (1993). DOMAIN: flexible modelling procedure.
+- Phillips et al. (2009). Sample selection bias and presence-only models.
 
 ## License
 
