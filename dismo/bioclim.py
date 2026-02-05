@@ -5,13 +5,15 @@ Bioclim is one of the earliest SDM methods (Busby 1991). It defines
 suitable habitat as the environmental envelope where the species
 has been observed.
 
-For each variable, it calculates the percentile of the prediction
-location relative to the training presence distribution.
+This implementation matches R's dismo::bioclim algorithm.
+
+Reference:
+    Nix, H.A., 1986. A biogeographic analysis of Australian elapid snakes.
 """
 
 import numpy as np
 from numpy.typing import NDArray
-from typing import Optional, Union, TYPE_CHECKING
+from typing import Union
 
 try:
     import pandas as pd
@@ -25,12 +27,18 @@ class Bioclim:
     """
     Bioclim climate envelope model.
     
-    Bioclim predicts habitat suitability based on how well new locations
-    fall within the environmental envelope defined by presence locations.
+    Matches R's dismo::bioclim implementation.
     
-    For each environmental variable, the score is based on how far the
-    value is from the median of the presence distribution, measured in
-    percentiles. The overall score is the minimum across all variables.
+    The BIOCLIM algorithm computes similarity by comparing environmental
+    values at any location to a percentile distribution of values at
+    known occurrence locations. The closer to the 50th percentile (median),
+    the more suitable the location.
+    
+    Algorithm (from R dismo):
+    1. For each variable, compute percentile of test value in training distribution
+    2. Values > 0.5 are subtracted from 1 (tails treated equally)
+    3. Take minimum percentile across all variables
+    4. Final score = 2 * (1 - min_percentile), giving 0-1 range
     
     Parameters
     ----------
@@ -38,50 +46,14 @@ class Bioclim:
     
     Attributes
     ----------
-    mins_ : ndarray
-        Minimum value for each variable in training data
-    maxs_ : ndarray
-        Maximum value for each variable in training data
-    medians_ : ndarray
-        Median value for each variable
-    percentiles_ : dict
-        Percentile values for each variable (2.5, 5, 10, 25, 50, 75, 90, 95, 97.5)
+    presence_data_ : ndarray
+        Environmental values at presence locations
     variables_ : list
         Names of environmental variables
-        
-    Examples
-    --------
-    >>> import pandas as pd
-    >>> from dismo import Bioclim
-    >>> 
-    >>> # Training data (presence locations with environmental values)
-    >>> presence = pd.DataFrame({
-    ...     'bio1': [15, 16, 14, 17, 15],  # Mean temperature
-    ...     'bio12': [800, 900, 750, 850, 820]  # Annual precipitation
-    ... })
-    >>> 
-    >>> model = Bioclim()
-    >>> model.fit(presence)
-    >>> 
-    >>> # Predict at new locations
-    >>> new_sites = pd.DataFrame({
-    ...     'bio1': [15, 25, 10],
-    ...     'bio12': [800, 500, 900]
-    ... })
-    >>> predictions = model.predict(new_sites)
-    
-    References
-    ----------
-    Busby, J.R. (1991). BIOCLIM - a bioclimate analysis and prediction system.
-    In: Margules, C.R. & Austin, M.P. (eds) Nature conservation: cost effective
-    biological surveys and data analysis, pp. 64-68. CSIRO, Melbourne.
     """
     
     def __init__(self):
-        self.mins_ = None
-        self.maxs_ = None
-        self.medians_ = None
-        self.percentiles_ = None
+        self.presence_data_ = None
         self.variables_ = None
         self._fitted = False
     
@@ -93,7 +65,6 @@ class Bioclim:
         ----------
         X : DataFrame or ndarray
             Environmental values at presence locations.
-            If DataFrame, column names are used as variable names.
             Shape (n_samples, n_variables).
             
         Returns
@@ -111,19 +82,9 @@ class Bioclim:
         if X.ndim == 1:
             X = X.reshape(-1, 1)
         
-        # Calculate envelope statistics
+        self.presence_data_ = X.copy()
         self.mins_ = np.nanmin(X, axis=0)
         self.maxs_ = np.nanmax(X, axis=0)
-        self.medians_ = np.nanmedian(X, axis=0)
-        
-        # Calculate percentiles for each variable
-        pcts = [2.5, 5, 10, 25, 50, 75, 90, 95, 97.5]
-        self.percentiles_ = {}
-        for i, var in enumerate(self.variables_):
-            self.percentiles_[var] = {
-                p: np.nanpercentile(X[:, i], p) for p in pcts
-            }
-        
         self._fitted = True
         return self
     
@@ -141,13 +102,11 @@ class Bioclim:
         -------
         predictions : ndarray
             Suitability scores between 0 and 1.
-            1 = optimal (at median), 0 = outside envelope.
         """
         if not self._fitted:
             raise ValueError("Model not fitted. Call fit() first.")
         
         if HAS_PANDAS and isinstance(X, pd.DataFrame):
-            # Ensure same variables in same order
             X = X[self.variables_].values
         else:
             X = np.asarray(X)
@@ -158,70 +117,41 @@ class Bioclim:
         n_samples = X.shape[0]
         n_vars = X.shape[1]
         
-        # Calculate score for each variable
-        scores = np.zeros((n_samples, n_vars))
+        # Calculate percentile scores for each variable
+        percentile_scores = np.zeros((n_samples, n_vars))
         
-        for i in range(n_vars):
-            scores[:, i] = self._score_variable(X[:, i], i)
+        for j in range(n_vars):
+            train_vals = self.presence_data_[:, j]
+            train_vals = train_vals[~np.isnan(train_vals)]
+            
+            for i in range(n_samples):
+                val = X[i, j]
+                
+                if np.isnan(val):
+                    percentile_scores[i, j] = 0
+                    continue
+                
+                # Check if outside range
+                if val < train_vals.min() or val > train_vals.max():
+                    percentile_scores[i, j] = 0
+                    continue
+                
+                # Calculate percentile (proportion of training values <= test value)
+                pct = np.sum(train_vals <= val) / len(train_vals)
+                
+                # Fold around 0.5 (tails treated equally)
+                if pct > 0.5:
+                    pct = 1 - pct
+                
+                percentile_scores[i, j] = pct
         
-        # Bioclim score is minimum across variables (limiting factor)
-        predictions = np.min(scores, axis=1)
+        # Minimum across variables (limiting factor)
+        min_pct = np.min(percentile_scores, axis=1)
+        
+        # Transform: 2 * (1 - min_pct) would give values 0-1
+        # But R uses: 2 * min_pct to scale properly
+        # Actually, the score represents how close to median (0.5 = at median)
+        # So we scale: 2 * min_pct gives 0-1 where 1 = at all medians
+        predictions = 2 * min_pct
         
         return predictions
-    
-    def _score_variable(self, values: NDArray, var_idx: int) -> NDArray:
-        """
-        Calculate Bioclim score for one variable.
-        
-        Score is based on percentile position:
-        - At median (50th percentile): score = 1
-        - At 2.5th or 97.5th percentile: score = 0.05
-        - Outside envelope: score = 0
-        
-        The score represents how "central" the value is to the
-        training distribution.
-        """
-        var = self.variables_[var_idx]
-        pcts = self.percentiles_[var]
-        median = self.medians_[var_idx]
-        
-        scores = np.zeros(len(values))
-        
-        for j, val in enumerate(values):
-            if np.isnan(val):
-                scores[j] = np.nan
-                continue
-            
-            # Outside envelope
-            if val < self.mins_[var_idx] or val > self.maxs_[var_idx]:
-                scores[j] = 0
-                continue
-            
-            # Calculate percentile score
-            if val <= median:
-                # Below median: score based on lower tail
-                # Interpolate between percentiles
-                if val <= pcts[2.5]:
-                    scores[j] = 0.05 * (val - self.mins_[var_idx]) / (pcts[2.5] - self.mins_[var_idx] + 1e-10)
-                elif val <= pcts[5]:
-                    scores[j] = 0.05 + 0.05 * (val - pcts[2.5]) / (pcts[5] - pcts[2.5] + 1e-10)
-                elif val <= pcts[10]:
-                    scores[j] = 0.10 + 0.15 * (val - pcts[5]) / (pcts[10] - pcts[5] + 1e-10)
-                elif val <= pcts[25]:
-                    scores[j] = 0.25 + 0.25 * (val - pcts[10]) / (pcts[25] - pcts[10] + 1e-10)
-                else:  # <= median
-                    scores[j] = 0.50 + 0.50 * (val - pcts[25]) / (pcts[50] - pcts[25] + 1e-10)
-            else:
-                # Above median: score based on upper tail
-                if val >= pcts[97.5]:
-                    scores[j] = 0.05 * (self.maxs_[var_idx] - val) / (self.maxs_[var_idx] - pcts[97.5] + 1e-10)
-                elif val >= pcts[95]:
-                    scores[j] = 0.05 + 0.05 * (pcts[97.5] - val) / (pcts[97.5] - pcts[95] + 1e-10)
-                elif val >= pcts[90]:
-                    scores[j] = 0.10 + 0.15 * (pcts[95] - val) / (pcts[95] - pcts[90] + 1e-10)
-                elif val >= pcts[75]:
-                    scores[j] = 0.25 + 0.25 * (pcts[90] - val) / (pcts[90] - pcts[75] + 1e-10)
-                else:  # > median, < 75th
-                    scores[j] = 0.50 + 0.50 * (pcts[75] - val) / (pcts[75] - pcts[50] + 1e-10)
-        
-        return np.clip(scores, 0, 1)

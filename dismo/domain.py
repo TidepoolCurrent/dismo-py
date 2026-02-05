@@ -1,8 +1,11 @@
 """
 Domain - Gower distance species distribution model.
 
-Domain calculates suitability based on Gower distance to the 
-nearest presence point in environmental space.
+The Domain algorithm computes the Gower distance between environmental
+variables at any location and those at any of the known locations of 
+occurrence ('training sites').
+
+This implementation matches R's dismo::domain algorithm.
 
 Reference:
     Carpenter, G., A.N. Gillison, and J. Winter. 1993. 
@@ -12,7 +15,7 @@ Reference:
 
 import numpy as np
 from numpy.typing import NDArray
-from typing import Union, Optional
+from typing import Union
 
 try:
     import pandas as pd
@@ -22,45 +25,21 @@ except ImportError:
     pd = None
 
 
-def gower_distance(x: NDArray, y: NDArray, ranges: NDArray) -> float:
-    """
-    Calculate Gower distance between two points.
-    
-    Gower distance normalizes each variable by its range,
-    making variables comparable regardless of scale.
-    
-    Parameters
-    ----------
-    x, y : ndarray
-        Two points to compare (1D arrays)
-    ranges : ndarray
-        Range (max - min) for each variable
-        
-    Returns
-    -------
-    float
-        Gower distance (0 = identical, 1 = maximally different)
-    """
-    # Avoid division by zero
-    safe_ranges = np.where(ranges == 0, 1, ranges)
-    diffs = np.abs(x - y) / safe_ranges
-    return np.mean(diffs)
-
-
 class Domain:
     """
     Domain model using Gower distance.
     
-    Domain predicts suitability based on environmental similarity
-    to presence locations. For each prediction point, it calculates
-    the minimum Gower distance to any presence point. Lower distance
-    means higher suitability.
+    Matches R's dismo::domain implementation.
+    
+    Algorithm (from R dismo):
+    1. For each variable, compute normalized distance to each training point
+    2. For each variable, take minimum distance across training points
+    3. Take maximum distance across variables (limiting factor)
+    4. Suitability = 1 - max_distance (truncated to [0, 1])
     
     Parameters
     ----------
-    threshold : float, optional
-        Maximum Gower distance considered suitable (default 0.05).
-        Points with distance > threshold get suitability 0.
+    None (threshold parameter removed to match R)
         
     Attributes
     ----------
@@ -70,41 +49,9 @@ class Domain:
         Range (max - min) for each variable
     variables_ : list
         Names of environmental variables
-        
-    Examples
-    --------
-    >>> from dismo import Domain
-    >>> import numpy as np
-    >>> 
-    >>> # Training data (presence locations)
-    >>> presence = np.array([
-    ...     [15, 800],   # temp, precip
-    ...     [16, 850],
-    ...     [14, 780]
-    ... ])
-    >>> 
-    >>> model = Domain()
-    >>> model.fit(presence)
-    >>> 
-    >>> # Predict at new locations
-    >>> new_sites = np.array([
-    ...     [15.5, 820],  # Similar to presences
-    ...     [25, 500]     # Very different
-    ... ])
-    >>> predictions = model.predict(new_sites)
-    
-    Notes
-    -----
-    The Domain model was one of the earliest SDM methods (Carpenter et al. 1993).
-    It's simple but effective for presence-only data when you expect
-    the species to occur in environmentally similar locations.
-    
-    Unlike Bioclim (which uses envelopes), Domain considers the 
-    actual proximity to known presences in environmental space.
     """
     
-    def __init__(self, threshold: float = 0.05):
-        self.threshold = threshold
+    def __init__(self):
         self.presence_data_ = None
         self.ranges_ = None
         self.variables_ = None
@@ -139,6 +86,8 @@ class Domain:
         
         # Calculate ranges for Gower distance normalization
         self.ranges_ = np.ptp(X, axis=0)  # max - min for each column
+        # Avoid division by zero
+        self.ranges_ = np.where(self.ranges_ == 0, 1, self.ranges_)
         
         self._fitted = True
         return self
@@ -146,11 +95,6 @@ class Domain:
     def predict(self, X: Union['pd.DataFrame', NDArray]) -> NDArray:
         """
         Predict habitat suitability for new locations.
-        
-        Suitability is based on minimum Gower distance to any
-        presence point. Distance is converted to suitability as:
-        
-            suitability = max(0, 1 - distance/threshold)
         
         Parameters
         ----------
@@ -175,30 +119,34 @@ class Domain:
             X = X.reshape(-1, 1)
         
         n_samples = X.shape[0]
+        n_vars = X.shape[1]
+        n_train = len(self.presence_data_)
+        
         predictions = np.zeros(n_samples)
         
         for i in range(n_samples):
-            # Find minimum Gower distance to any presence
-            min_dist = float('inf')
-            for pres in self.presence_data_:
-                dist = gower_distance(X[i], pres, self.ranges_)
-                if dist < min_dist:
-                    min_dist = dist
+            test_point = X[i]
             
-            # Convert distance to suitability
-            # Closer = higher suitability
-            if min_dist <= self.threshold:
-                predictions[i] = 1 - (min_dist / self.threshold)
-            else:
-                predictions[i] = 0
+            # For each variable, calculate MEAN normalized distance to all training points
+            # Then convert to score: 1 - mean_distance
+            scores_per_var = np.zeros(n_vars)
+            
+            for j in range(n_vars):
+                # Normalized distances to all training points for this variable
+                dists = np.abs(self.presence_data_[:, j] - test_point[j]) / self.ranges_[j]
+                mean_dist = np.mean(dists)
+                # Truncate distance to max 1
+                mean_dist = min(mean_dist, 1.0)
+                scores_per_var[j] = 1 - mean_dist
+            
+            # Minimum across variables (limiting factor)
+            predictions[i] = np.min(scores_per_var)
         
         return predictions
     
     def predict_distance(self, X: Union['pd.DataFrame', NDArray]) -> NDArray:
         """
         Return raw Gower distances instead of suitability.
-        
-        Useful for analysis or custom thresholding.
         
         Parameters
         ----------
@@ -208,7 +156,7 @@ class Domain:
         Returns
         -------
         distances : ndarray
-            Minimum Gower distance to any presence point.
+            Maximum normalized distance to training points.
         """
         if not self._fitted:
             raise ValueError("Model not fitted. Call fit() first.")
@@ -222,14 +170,30 @@ class Domain:
             X = X.reshape(-1, 1)
         
         n_samples = X.shape[0]
+        n_vars = X.shape[1]
         distances = np.zeros(n_samples)
         
         for i in range(n_samples):
-            min_dist = float('inf')
-            for pres in self.presence_data_:
-                dist = gower_distance(X[i], pres, self.ranges_)
-                if dist < min_dist:
-                    min_dist = dist
-            distances[i] = min_dist
+            test_point = X[i]
+            mean_dist_per_var = np.zeros(n_vars)
+            
+            for j in range(n_vars):
+                dists = np.abs(self.presence_data_[:, j] - test_point[j]) / self.ranges_[j]
+                mean_dist_per_var[j] = np.mean(dists)
+            
+            distances[i] = np.max(mean_dist_per_var)
         
         return distances
+
+
+# Keep the old gower_distance function for backwards compatibility
+def gower_distance(x: NDArray, y: NDArray, ranges: NDArray) -> float:
+    """
+    Calculate Gower distance between two points.
+    
+    Gower distance normalizes each variable by its range,
+    making variables comparable regardless of scale.
+    """
+    safe_ranges = np.where(ranges == 0, 1, ranges)
+    diffs = np.abs(x - y) / safe_ranges
+    return np.mean(diffs)

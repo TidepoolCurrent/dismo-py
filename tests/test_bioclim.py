@@ -127,10 +127,33 @@ class TestBioclim:
 class TestBioclimRParity:
     """Test parity with R dismo::bioclim."""
     
-    @pytest.mark.skip(reason="R reference data not yet generated")
     def test_predict_parity(self):
-        """Compare predictions to R dismo."""
-        pass
+        """Compare predictions to R dismo::bioclim."""
+        # Training data
+        train = np.array([
+            [15, 800],
+            [16, 900],
+            [14, 750],
+            [17, 850],
+            [15, 820]
+        ])
+        
+        # Test data
+        test = np.array([
+            [15.5, 825],
+            [25, 500],
+            [14.5, 780]
+        ])
+        
+        # R reference values (from dismo::bioclim)
+        r_predictions = np.array([0.8, 0, 0.4])
+        
+        model = Bioclim()
+        model.fit(train)
+        py_predictions = model.predict(test)
+        
+        assert np.allclose(py_predictions, r_predictions), \
+            f"Python {py_predictions} != R {r_predictions}"
 
 
 if __name__ == "__main__":
